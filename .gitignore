@@ -1,0 +1,14 @@
+# Python
+__pycache__/
+*.pyc
+
+# ngspice / SPICE artifacts (keep SIM_RESULTS.txt — it's checked-in evidence)
+*.raw
+*.out
+
+# editor / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db

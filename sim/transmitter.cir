@@ -1,0 +1,59 @@
+* Analog 4-20 mA NTC thermistor transmitter -- transfer-function verification
+* ---------------------------------------------------------------------------
+* Models the IDEAL signal chain (reference + op-amps as behavioral sources) to
+* confirm the temperature -> loop-current transfer and the in-band linearity.
+* Device-level modeling (real op-amps, the discrete pre-regulator, and the
+* dump-transistor servo loop with its stability) is a separate, more detailed
+* netlist -- this one answers "does the math give 4-20 mA with <0.1 C
+* conformity?".
+*
+* Written for ngspice (`ngspice transmitter.cir`). For LTspice, change the
+* behavioral resistor syntax  r='...'  to  R=...  .
+*
+* Design values come straight from tools/design.py (20-40 C -> 4-20 mA):
+.param R25   = 10000      ; thermistor at 25 C (Omega 44006)
+.param BETA  = 3892       ; thermistor beta, K
+.param RLIN  = 5900       ; linearization resistor (parallel with NTC), ohm
+.param VREF  = 2.500      ; reference (LM4040-2.5), V
+.param IEXC  = 250u       ; excitation current pulled through the network, A
+.param GAIN  = 2.6635     ; SPAN  (amplifier gain)        <- span pot
+.param VZERO = 1.4230     ; ZERO  (amplifier offset), V   <- zero pot
+.param RSNS  = 50         ; loop current-sense resistor, ohm
+.param VLOOPV= 24         ; loop supply, V
+.param RREC  = 250        ; receiver / loop-load resistor, ohm
+
+* --- temperature is carried as a node voltage: 1 V == 1 degC ---------------
+Vtemp temp 0 30
+
+* --- reference (ideal) ------------------------------------------------------
+Vref vref 0 {VREF}
+
+* --- sensor: network (NTC || RLIN) tied to Vref, current sink pulls IEXC ----
+* V(x) = Vref - IEXC*(Rt(T) || RLIN).  Rises as temperature rises.
+Rntc vref x r='R25*exp(BETA*(1/(v(temp)+273.15)-1/298.15))'
+Rlin vref x {RLIN}
+Isink x 0 dc {IEXC}
+
+* --- gain/zero amplifier (ideal): Vcmd = GAIN*(V(x) - VZERO) ---------------
+* Clamped to the 3.8 mA .. 20.5 mA limits the real output stage enforces.
+Ecmd vcmd 0 value='min(max(GAIN*(v(x) - VZERO), 3.8m*RSNS), 20.5m*RSNS)'
+
+* --- output stage (ideal): loop current = Vcmd / Rsense --------------------
+* The real circuit servos a dump transistor so the loop current through RSNS
+* equals Vcmd/RSNS; here a behavioral sink does the same thing.
+Vsupply rail 0 {VLOOPV}
+Rrec    rail loop_p {RREC}
+Gloop   loop_p 0 value='v(vcmd)/RSNS'
+Rdummy  loop_p 0 1G        ; dc path for the node
+
+.control
+  dc Vtemp -10 50 1
+  let rsns = 50                       ; same as .param RSNS (params aren't in control scope)
+  let iloop_mA = v(vcmd)/rsns * 1000
+  let headroom = v(loop_p)            ; volts left across the instrument
+  print v(temp) v(x) v(vcmd) iloop_mA headroom
+  * quick eyeball: iloop should be 4.00 mA @ 20C and 20.00 mA @ 40C
+  quit
+.endc
+
+.end
