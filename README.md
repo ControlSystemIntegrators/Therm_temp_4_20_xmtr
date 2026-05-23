@@ -331,19 +331,24 @@ sensor front-end and linearization theory carry over unchanged.
 ## Repository layout
 
 ```
-analog-temp-transmitter/
-├── README.md              # this file
+Therm_temp_4_20_xmtr/
+├── README.md                    # this file
+├── LICENSE                      # MIT
+├── docs/
+│   └── DESIGN_CONVERSATION.md   # the prompts that drove the design + decisions
 ├── tools/
-│   └── design.py          # parameterized design calculator (no dependencies)
+│   └── design.py                # parameterized design calculator (no dependencies)
 └── sim/
-    └── transmitter.cir    # ngspice/LTspice transfer-function verification
+    ├── transmitter.cir          # ngspice/LTspice transfer-function verification
+    └── SIM_RESULTS.txt          # captured ngspice 46 output
 ```
+
+For *how* this design came to be — the design conversation and the reasoning
+behind each choice — see [`docs/DESIGN_CONVERSATION.md`](docs/DESIGN_CONVERSATION.md).
 
 Planned next: a KiCad schematic + PCB, and a device-level SPICE model of the
 output stage.
 
 ## License
 
-Intended for public release — choose a license before publishing (MIT for the
-code/docs, CERN-OHL-S or similar for hardware are common choices). No license
-file is committed yet.
+[MIT](LICENSE). Use it, build it, sell it — just keep the copyright notice.
