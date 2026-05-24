@@ -36,9 +36,9 @@ It does two jobs:
 | Loop supply | 7–30 V (24 V typical) |
 | Default range | **20–40 °C → 4–20 mA** (chocolate) |
 | Sensor | NTC thermistor, 10 kΩ @ 25 °C, β ≈ 3892 K (e.g. Omega 44006) |
-| In-band conformity | **±0.06 °C** (electronics + linearization; sensor adds its own interchangeability tolerance) |
+| In-band accuracy | **±0.1 °C over the 20 °C band** (realistic system figure; the electronics + linearization contribute only ~±0.06 °C — sensor interchangeability, self-heating and lead effects dominate) |
 | Calibration | zero + span trimpots, non-interactive |
-| Quiescent current | ~1.5–2 mA (fits under the 4 mA floor) |
+| Quiescent current | ~2.6 mA (fits under the 4 mA floor) |
 | Components | jellybean / multi-sourced; op-amps in SOT-23-5 |
 
 Outside the chosen band the output saturates near 4 mA (cold) or 20 mA (hot) —
@@ -94,8 +94,11 @@ temperature `Tc` (kelvin) is:
 Rlin = Rt(Tc) · (β − 2·Tc) / (β + 2·Tc)
 ```
 
-For the chocolate build (center 30 °C) that's **5.90 kΩ**, and the residual
-nonlinearity across 20–40 °C is only **±0.06 °C**.
+For the chocolate build (center 30 °C) the closed-form (unloaded) value is
+~5.9 kΩ; the build uses **6.04 kΩ**, re-optimized for the gain-stage loading
+(see [below](#dont-let-the-gain-stage-load-the-sensor)). Either way the residual
+nonlinearity across 20–40 °C is only ~**±0.06 °C** — comfortably inside the
+±0.1 °C system spec, so the linearization is never the limiting term.
 
 ### Why one resistor and not two
 
@@ -114,6 +117,31 @@ toward "constant current," and the conformity barely moves:
 interaction. We dropped it. **The real lever is band width, not resistor count**
 (see the table — the wider the band, the worse the conformity). Pick the
 narrowest band that covers where your process actually operates.
+
+### Don't let the gain stage load the sensor
+
+There's a subtle trap the ideal math hides. The single-op-amp difference amp
+(next stage) presents its input network — `R9 + R12` from the sensor node to
+ground — as a *load* on node X. The sensor's source impedance there is the
+linearized network (a few kΩ), so a low input impedance bleeds a
+temperature-dependent current out of the node and **bows V(X)**, adding
+nonlinearity the zero/span trims cannot remove.
+
+We only caught this with the **device-level SPICE model** (the ideal netlist and
+the first cut of `design.py` both assumed an infinite-impedance gain input). With
+the original 10 k / 24.9 k divider (`R9+R12 ≈ 35 kΩ`) loading a ~4 kΩ source, the
+in-band conformity blew out to **±0.18 °C** — past the spec. Two fixes, both
+verified:
+
+1. **Raise the gain-stage input impedance** so it stops loading the node — this
+   build uses `R9=R10=100 kΩ`, `R11=R12=249 kΩ` (`R9+R12 ≈ 349 kΩ`, ~1 % loading).
+2. **Re-optimize R1** for whatever loading remains — `design.py` now models the
+   load (`--rload`) and searches for the best linearization resistor rather than
+   trusting the unloaded closed form (hence 6.04 kΩ, not 5.9 kΩ).
+
+With both, conformity is back to **±0.058 °C**, confirmed in the device-level
+sim. Lesson: a difference amp driven from a non-trivial source impedance must
+have an input impedance well above it, or you pay for it in linearity.
 
 You can reproduce all of this — and design for your own sensor/range — with
 [`tools/design.py`](tools/design.py).
@@ -147,7 +175,7 @@ current.
 ```
  LOOP+ ──▷|──┬───────────────────────────────┬──────────► IN (raw 7..30 V)
    (24 V) D1 │                               │
-           TVS         pre-reg: Q1 + TLV431 ──┤────────► VL (+5 V) ─► Vref, A1, A2, A3
+           TVS         pre-reg: Q1 + TL431 ───┤────────► VL (+5 V) ─► Vref, A1, A2, A3
             │          (series NPN follower)  │
             │                                 └────────► Q2 collector (dump)
             │                                                  │ emitter
@@ -157,9 +185,9 @@ current.
 ```
 
 Everything returns to `AGND` and flows out through `Rsense`, so the
-sense resistor sees the **total** loop current — the electronics' own ~1.7 mA
+sense resistor sees the **total** loop current — the electronics' own ~2.6 mA
 quiescent draw plus whatever the dump transistor `Q2` adds. A3 servos `Q2` until
-that total equals `Vcmd / Rsense`. Because quiescent draw (~1.7 mA) is below the
+that total equals `Vcmd / Rsense`. Because quiescent draw (~2.6 mA) is below the
 4 mA floor, `Q2` always has something to add.
 
 ### Stage-by-stage
@@ -167,10 +195,10 @@ that total equals `Vcmd / Rsense`. Because quiescent draw (~1.7 mA) is below the
 | Stage | Parts | Function | Key relation |
 |---|---|---|---|
 | Protection | D1 (Schottky), TVS | reverse-polarity + surge | — |
-| Pre-regulator | Q1 (NPN follower), TLV431, divider | makes the +5 V rail `VL` from the loop; **series** pass, not shunt, so it draws only what the electronics need | `VL = 1.24·(1+Rfa/Rfb)` |
+| Pre-regulator | Q1 (NPN follower), TL431, divider, + Q4/Q5 bias source | makes the +5 V rail `VL` from the loop; **series** pass, not shunt, so it draws only what the electronics need. Q4/Q5 form a 2-transistor constant-current source (a jellybean replacement for a current-regulating diode) that biases the TL431 flat across the 7–30 V loop | `VL = 2.5·(1+Rfa/Rfb)` |
 | Reference | LM4040-2.5 | 2.500 V for excitation + zero | — |
 | Excitation | A1, Q3, Rexc | constant `Iexc = Vref/Rexc = 0.25 mA` pulled through `NTC∥Rlin` | `V(X)=Vref − Iexc·Rnet` |
-| Linearization | Rlin (5.90 kΩ) | straighten the curve in-band | `Rlin = Rt(Tc)·(β−2Tc)/(β+2Tc)` |
+| Linearization | Rlin (6.04 kΩ) | straighten the curve in-band | `Rlin = Rt(Tc)·(β−2Tc)/(β+2Tc)`, re-optimized for load |
 | Gain/Zero | A2 + **span pot** + **zero pot** | scale & offset to the command voltage | `Vcmd = SPAN·(V(X) − ZERO)` |
 | Output | A3, Q2, Rsense | servo loop current to the command | `Iloop = Vcmd / Rsense` |
 
@@ -197,13 +225,13 @@ default:
 
 ```
 --- Linearization ---
-Rlin (E96)      : 5.900 kohm   <- parallel with thermistor
+Rlin (E96)      : 6.040 kohm   <- re-optimized for gain-stage loading
 Conformity      : +/- 0.059 C
 --- Excitation ---
 Rexc (E96)      : 10.000 kohm  -> Iexc = 0.2500 mA
 --- Amplifier / output stage ---
-SPAN  (gain)    : 2.6635 V/V   <- set by span pot
-ZERO  (Vzero)   : 1.4230 V     <- set by zero pot
+SPAN  (gain)    : 2.5706 V/V   <- set by span pot
+ZERO  (Vzero)   : 1.3872 V     <- set by zero pot
 ```
 
 **Manual recipe** (what the script does):
@@ -249,19 +277,19 @@ should be repairable for decades without a single-source IC.
 | Ref | Part | Function | Second-source notes |
 |---|---|---|---|
 | RT1 | NTC 10 kΩ, β≈3892 (Omega 44006 / equiv.) | sensor | any 10k NTC with known β; re-run calculator for other betas |
-| Rlin | 5.90 kΩ, 0.1%, ≤25 ppm/°C | linearization | passive, universal |
+| Rlin | 6.04 kΩ, 1%, ≤25 ppm/°C | linearization | passive, universal |
 | U1 | LM4040-2.5 (2.500 V) | reference | TI, ADI, Diodes, ON |
-| U2 | TLV431 (or TL431) | pre-reg reference | TI, ON, Diodes, ST, UTC |
+| U2 | TL431 (2.5 V shunt ref) | pre-reg reference | TI, ON, Diodes, ST, UTC — *the* multi-sourced jellybean; KiCad sym `TL431DBZ` (SOT-23) |
 | Q1 | NPN small-signal (MMBT3904 / BC847) | pre-reg pass (follower) | universal |
 | Q2 | NPN, ~0.5 W (SOT-223, e.g. BCP56 / PZTA42) | output dump transistor | universal; **see thermal note** |
 | Q3 | NPN small-signal (MMBT3904 / BC847) | excitation current sink | universal |
 | A1–A3 | µpower precision op-amp, **SOT-23-5** (OPA333 / MCP6V31 / TLV9061-class) | excitation, gain/zero, output servo | by exact PN limited; by SOT-23-5 footprint, dozens of swappable parts |
-| Rexc | 10.0 kΩ, 0.1% | sets Iexc | passive |
-| Rsense | 49.9 Ω (or 50 Ω), 0.1%, ≤25 ppm/°C | loop sense | passive |
-| Rfa/Rfb | 30.1 kΩ / 10.0 kΩ, 1% | sets VL = 5 V | passive |
-| RV1 | zero trim, multiturn cermet (e.g. 3296W) | ZERO | universal |
-| RV2 | span trim, multiturn cermet | SPAN | universal |
-| D1 | Schottky (BAT54 / 1N5819) | reverse polarity | universal |
+| Rexc | 10.0 kΩ, 1%, ≤25 ppm/°C | sets Iexc | passive |
+| Rsense | 49.9 Ω (or 50 Ω), 1%, ≤25 ppm/°C | loop sense | passive |
+| Rfa/Rfb | 10.0 kΩ / 10.0 kΩ, 1% | sets VL = 2.5·(1+Rfa/Rfb) = 5 V | passive |
+| RV1 | zero trim, SMD multiturn cermet (e.g. 3269 / 3224) | ZERO | universal |
+| RV2 | span trim, SMD multiturn cermet | SPAN | universal |
+| D1 | Schottky SMA (SS14 / BAT54) | reverse polarity | universal |
 | TVS1 | SMAJ33A (or per supply) | surge | universal |
 | C1–Cn | 100 nF + 1–10 µF bypass | decoupling | universal |
 
@@ -307,8 +335,9 @@ band clamping behaves as designed.
 
 **Verification status (be honest about it):**
 
-- ✅ Signal-chain transfer and **±0.06 °C in-band conformity** — verified in
-  `tools/design.py` **and confirmed in ngspice** (table above).
+- ✅ Signal-chain transfer and linearization conformity (~**±0.06 °C**, well
+  inside the **±0.1 °C** system spec) — verified in `tools/design.py` **and
+  confirmed in ngspice** (table above).
 - ⬜ Discrete output stage (the Q1 pre-regulator and the Q2/A3 servo loop,
   including loop stability and Q2 thermals) — **designed but not yet
   device-level simulated or bench-verified.** The netlist above models the

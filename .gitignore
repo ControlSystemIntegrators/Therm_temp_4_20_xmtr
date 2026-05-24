@@ -12,3 +12,17 @@ __pycache__/
 *.swp
 .DS_Store
 Thumbs.db
+
+# KiCad — backups, locks, autosave, per-user state
+*-backups/
+*.kicad_prl
+*.bak
+*.lck
+~*.lck
+*auto_saved_files*
+_autosave-*
+fp-info-cache/
+
+# vendor symbol/footprint import scaffolding (we use stock libs now)
+therm_kicad/therm/library_objects/
+therm_kicad_fp.pretty/

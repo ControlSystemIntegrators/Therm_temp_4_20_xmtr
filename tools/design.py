@@ -31,6 +31,10 @@ DEFAULTS = dict(
     vref=2.500,     # voltage reference (LM4040-2.5)  (V)
     rsense=50.0,    # loop current-sense resistor (ohm); Iloop = Vcmd / Rsense
     diss=5.0e-3,    # probe dissipation constant (W/degC) for self-heat estimate
+    rload=349000.0, # gain-stage input resistance (R9+R12) loading node X to AGND.
+                    # The single-op-amp difference amp hangs R9+R12 on the sensor
+                    # node; this finite load bows V(x) and degrades conformity.
+                    # Large => negligible. 34.9k = old (10k+24.9k); 349k = fixed.
 )
 
 # E96 1% / 0.1% mantissas (one decade)
@@ -92,15 +96,43 @@ def best_line(xs, ys):
     return a, b
 
 
-def conformity_degC(rlin, r25, beta, tlow, thigh, n=81):
-    """Max deviation of the linearized network from a straight line, in deg C,
-    over [tlow, thigh]. Excitation is constant-current so V is proportional to
-    Rnet; the conformity is therefore a property of Rnet(T) alone."""
+def vx_of_T(tc, r25, beta, rlin, vref, iexc, rload):
+    """Sensor node voltage V(x) at temperature tc, INCLUDING the loading of the
+    gain-stage input resistance (rload, = R9+R12) from node x to AGND.
+
+    Node x: constant-current sink Iexc pulls down; the network (Rnet) feeds from
+    Vref; rload bleeds V(x)/rload to ground. KCL gives:
+
+        V(x) = (Vref - Iexc*Rnet) / (1 + Rnet/rload)
+
+    rload -> infinity recovers the ideal  V(x) = Vref - Iexc*Rnet.
+    """
+    rn = rnet(tc, r25, beta, rlin)
+    return (vref - iexc * rn) / (1.0 + rn / rload)
+
+
+def conformity_degC(rlin, r25, beta, tlow, thigh, vref, iexc, rload, n=81):
+    """Max deviation of V(x) from a straight line, in deg C, over [tlow, thigh].
+    Now computed on the LOADED node voltage (see vx_of_T), so the gain-stage
+    input loading is included -- this is the real in-band conformity."""
     ts = [tlow + (thigh - tlow) * i / (n - 1) for i in range(n)]
-    vs = [rnet(t, r25, beta, rlin) for t in ts]
+    vs = [vx_of_T(t, r25, beta, rlin, vref, iexc, rload) for t in ts]
     a, b = best_line(ts, vs)
-    devs = [(v - (a * t + b)) / a for t, v in zip(ts, vs)]  # ohm/(ohm/degC)=degC
+    devs = [(v - (a * t + b)) / a for t, v in zip(ts, vs)]  # V/(V/degC)=degC
     return max(abs(d) for d in devs), list(zip(ts, devs))
+
+
+def optimize_rlin(r25, beta, tlow, thigh, vref, iexc, rload, r0, span=0.5, steps=800):
+    """Numerically pick Rlin for minimum loaded conformity (scans +/-span around
+    the unloaded closed-form value r0). With loading, the closed-form optimum
+    shifts, so we search rather than trust the formula."""
+    best = (r0, float("inf"))
+    for i in range(steps + 1):
+        rl = r0 * (1.0 - span) + (2.0 * span * r0) * i / steps
+        c, _ = conformity_degC(rl, r25, beta, tlow, thigh, vref, iexc, rload)
+        if c < best[1]:
+            best = (rl, c)
+    return best[0]
 
 
 def design(cfg):
@@ -108,23 +140,27 @@ def design(cfg):
     tlow, thigh = cfg["tlow"], cfg["thigh"]
     r25, beta = cfg["r25"], cfg["beta"]
     iexc, vref, rsense = cfg["iexc"], cfg["vref"], cfg["rsense"]
+    rload = cfg["rload"]
 
     tc = 0.5 * (tlow + thigh)                      # band center
-    rlin_ideal = rlin_for_center(tc, r25, beta)
-    rlin = e96(rlin_ideal)
-    out.update(tc=tc, rlin_ideal=rlin_ideal, rlin=rlin)
+    rlin_ideal = rlin_for_center(tc, r25, beta)    # unloaded closed-form
 
     # excitation set resistor: Iexc = Vref / Rexc
     rexc = e96(vref / iexc)
     iexc_actual = vref / rexc
     out.update(rexc=rexc, iexc_actual=iexc_actual)
 
+    # re-optimize Rlin for the LOADED node (closed-form optimum shifts with rload)
+    rlin_opt = optimize_rlin(r25, beta, tlow, thigh, vref, iexc_actual, rload, rlin_ideal)
+    rlin = e96(rlin_opt)
+    out.update(tc=tc, rlin_ideal=rlin_ideal, rlin_opt=rlin_opt, rlin=rlin, rload=rload)
+
     # sensor NODE voltage at the band edges.
     # The network top is tied to Vref and a current sink pulls Iexc through it,
     # so the sensed node is  Vx = Vref - Iexc*Rnet.  Rnet falls as T rises, so
     # Vx RISES with temperature (same direction as the desired output).
-    vx_low = vref - iexc_actual * rnet(tlow, r25, beta, rlin)
-    vx_high = vref - iexc_actual * rnet(thigh, r25, beta, rlin)
+    vx_low = vx_of_T(tlow, r25, beta, rlin, vref, iexc_actual, rload)
+    vx_high = vx_of_T(thigh, r25, beta, rlin, vref, iexc_actual, rload)
     out.update(vx_low=vx_low, vx_high=vx_high)
 
     # output stage: Iloop = Vcmd / Rsense ; Vcmd = G * (Vx - Vzero)
@@ -134,8 +170,8 @@ def design(cfg):
     vzero = vx_low - vcmd_low / gain
     out.update(vcmd_low=vcmd_low, vcmd_high=vcmd_high, gain=gain, vzero=vzero)
 
-    # conformity inside the band
-    cmax, table = conformity_degC(rlin, r25, beta, tlow, thigh)
+    # conformity inside the band (loaded)
+    cmax, table = conformity_degC(rlin, r25, beta, tlow, thigh, vref, iexc_actual, rload)
     out.update(conformity=cmax, table=table)
 
     # self-heating at the hot end (worst case: lowest R, most current in bead)
@@ -168,8 +204,9 @@ def report(cfg, d):
     p(f"Band center     : {d['tc']:.1f} C")
     p("")
     p("--- Linearization ---")
-    p(f"Rlin (ideal)    : {fmt_ohm(d['rlin_ideal'])}")
-    p(f"Rlin (E96)      : {fmt_ohm(d['rlin'])}   <- parallel with thermistor")
+    p(f"Gain-stage load : {fmt_ohm(d['rload'])} (R9+R12 on node x; large => negligible)")
+    p(f"Rlin (unloaded) : {fmt_ohm(d['rlin_ideal'])}  (closed-form, ignores loading)")
+    p(f"Rlin (E96)      : {fmt_ohm(d['rlin'])}   <- re-optimized for the load")
     p(f"Conformity      : +/- {d['conformity']:.3f} C  (max error vs straight line in band)")
     p("")
     p("--- Excitation ---")
@@ -193,7 +230,8 @@ def report(cfg, d):
     while t <= cfg["thigh"] + 1e-6:
         rtt = rt(t, cfg["r25"], cfg["beta"])
         rn = rnet(t, cfg["r25"], cfg["beta"], d["rlin"])
-        vx = cfg["vref"] - d["iexc_actual"] * rn
+        vx = vx_of_T(t, cfg["r25"], cfg["beta"], d["rlin"],
+                     cfg["vref"], d["iexc_actual"], cfg["rload"])
         iloop = d["gain"] * (vx - d["vzero"]) / cfg["rsense"]
         # nearest tabulated deviation
         err = min(d["table"], key=lambda te: abs(te[0] - t))[1]
