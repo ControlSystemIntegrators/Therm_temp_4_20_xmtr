@@ -357,6 +357,52 @@ sensor front-end and linearization theory carry over unchanged.
 
 ---
 
+## Working with KiCad — notes and gotchas
+
+Taking this from netlist to schematic to PCB surfaced a few KiCad limitations
+worth recording — both for anyone reproducing the board and for anyone doing a
+careful (or AI-assisted) review of a `.kicad_sch`:
+
+- **Connectivity can't be read reliably from the `.kicad_sch` text.** Symbol
+  mirror/rotation transforms and overlapping wire segments defeat any attempt to
+  infer "what's connected to what" from pin coordinates. Let KiCad compute it
+  instead — `kicad-cli sch export netlist --format kicadsexpr -o net.net
+  therm.kicad_sch` — and read the nets. Every net-by-net review of this board was
+  done that way, not by eyeballing the schematic file.
+
+- **ERC does not catch wrong *values* or wrong *roles*.** Several real errors
+  here passed connectivity checks clean: a `49.9 kΩ` loop-sense resistor that
+  should have been `49.9 Ω`; a bypass cap with *both* pins on the same net (a
+  no-op); an op-amp powered from the 2.5 V reference instead of the 5 V rail; and
+  the LM4040 reference wired across the loop input as if it were the TVS. None of
+  these trip ERC — they need an explicit value-and-node audit against intent.
+
+- **Symbol variants have different pin numbering.** The OPA333 in SOIC-8
+  (`OPA333xxD`) uses pins 2/3/4/6/7; in SOT-23-5 (`OPA333xxDBV`) it's 1–5. Grab
+  the wrong variant and the schematic *looks* right while the netlist is wrong —
+  always confirm the symbol's package/pinout matches the footprint you intend.
+
+- **Not every jellybean part is in the stock library.** The TL431 is
+  (`Reference_Voltage:TL431DBZ`); the TLV431 is not, which had forced a custom
+  symbol — one reason we standardized on the TL431. Preferring stock-library
+  parts avoids custom-symbol upkeep.
+
+- **Footprints aren't auto-assigned.** Symbols sit with an empty footprint until
+  you assign one, and nothing warns you until you try to lay out the board — the
+  two trimpots were caught this way. Sweep for missing footprints before routing.
+
+- **File hygiene.** KiCad scatters `*-backups/` zips, `~*.lck` locks,
+  `#auto_saved_files#`, and per-user `*.kicad_prl` state through the project; the
+  [`.gitignore`](.gitignore) excludes them so only the real design files track.
+
+**Takeaway:** a parameterized calculator proves the design *intent*, and ERC
+proves the nets are *connected* — but neither flags a wrong value, a wrong
+package variant, or a node that's electrically valid yet functionally pointless.
+A net-by-net netlist review plus a device-level SPICE pass are what actually
+prove the *instrument*.
+
+---
+
 ## Repository layout
 
 ```
@@ -365,18 +411,24 @@ Therm_temp_4_20_xmtr/
 ├── LICENSE                      # MIT
 ├── docs/
 │   └── DESIGN_CONVERSATION.md   # the prompts that drove the design + decisions
+├── hardware/
+│   └── BOM.md                   # bill of materials (consolidated values, tempco notes)
 ├── tools/
-│   └── design.py                # parameterized design calculator (no dependencies)
-└── sim/
-    ├── transmitter.cir          # ngspice/LTspice transfer-function verification
-    └── SIM_RESULTS.txt          # captured ngspice 46 output
+│   └── design.py                # parameterized design calculator (models gain-stage load)
+├── sim/
+│   ├── transmitter.cir          # ideal transfer-function verification
+│   ├── device_level.cir         # discrete model (real BJTs + IC macromodels)
+│   └── SIM_RESULTS.txt          # captured ngspice 46 output
+└── therm_kicad/                 # KiCad project: schematic + rough PCB
+    └── therm/                   # therm.kicad_sch / .kicad_pcb / .kicad_pro
 ```
 
 For *how* this design came to be — the design conversation and the reasoning
 behind each choice — see [`docs/DESIGN_CONVERSATION.md`](docs/DESIGN_CONVERSATION.md).
 
-Planned next: a KiCad schematic + PCB, and a device-level SPICE model of the
-output stage.
+Status: schematic + a rough PCB are in `therm_kicad/`; the device-level SPICE
+model verifies the discrete signal chain. Still open: output-stage **loop
+stability** (AC/transient) and **bench bring-up**.
 
 ## License
 
